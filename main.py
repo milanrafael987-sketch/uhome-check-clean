@@ -135,7 +135,6 @@ async def disallow_chat(chat_id: int) -> None:
         await db.execute("DELETE FROM allowed_chats WHERE chat_id = ?", (chat_id,))
         await db.commit()
 
-> Rafael Krasovskikh:
 async def get_allowed_chats() -> list[tuple[int, str]]:
     async with aiosqlite.connect(DB_PATH) as db:
         rows = await db.execute_fetchall(
