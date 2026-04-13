@@ -41,7 +41,7 @@ def smart_merge(old_items, new_items, old_status, old_users):
             new_users.append(None)
     return new_status, new_users
 
-def filter_items(items, status, users, mode):
+def filter_items(items, status, mode):
     result = []
     for i, item in enumerate(items):
         s = status[i]
@@ -62,25 +62,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     command = text.replace("!!!", "").strip().lower()
 
-    # FILTER MODE
+    # FILTER
     if command in ["empty only", "done only", "not done", "empty and warning"]:
         reply = update.message.reply_to_message
         if not reply:
             return
 
-        cid = str(reply.message_id)
+        if reply.reply_to_message:
+            cid = str(reply.reply_to_message.message_id)
+        else:
+            cid = str(reply.message_id)
+
         if cid not in checklists:
             return
 
         data = checklists[cid]
-        filtered = filter_items(data["items"], data["status"], data["users"], command)
+        filtered = filter_items(data["items"], data["status"], command)
 
-        new_text = "!!! filtered\n" + "\n".join(f"- {i}" for i in filtered)
-
+        new_text = "!!! filtered\n" + "\n".join(filtered)
         await update.message.reply_text(new_text)
         return
 
-    # NORMAL CHECKLIST
+    # CREATE / UPDATE
     title, items = parse_checklist(text)
     cid = str(update.message.message_id)
 
@@ -135,7 +138,7 @@ async def toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_reply_markup(reply_markup=build_keyboard(cid))
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔥 Бот с фильтрами готов")
+    await update.message.reply_text("🔥 FINAL BOT WORKING")
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
@@ -145,7 +148,7 @@ def main():
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_edit))
     app.add_handler(CallbackQueryHandler(toggle))
 
-    print("Filter checklist bot running...")
+    print("BOT RUNNING...")
     app.run_polling()
 
 if __name__ == "__main__":
