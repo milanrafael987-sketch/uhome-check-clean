@@ -149,7 +149,7 @@ def can_use_bot(update: Update) -> bool:
         return owner_id is not None and user.id == owner_id
 
     return is_allowed_chat(chat.id)
-  def parse_source(text: str):
+def parse_source(text: str):
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     first = lines[0].strip()
     title = first[len(SOURCE_PREFIX):].strip() if first.startswith(SOURCE_PREFIX) else first
