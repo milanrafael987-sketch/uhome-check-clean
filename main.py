@@ -1,154 +1,138 @@
 import os
+import sqlite3
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-checklists = {}
+conn = sqlite3.connect("bot.db", check_same_thread=False)
+cur = conn.cursor()
+
+# TABLES
+cur.execute("CREATE TABLE IF NOT EXISTS owner (user_id TEXT PRIMARY KEY)")
+cur.execute("CREATE TABLE IF NOT EXISTS allowed_chats (chat_id TEXT PRIMARY KEY)")
+cur.execute("CREATE TABLE IF NOT EXISTS items (cid TEXT, position INTEGER, text TEXT, status TEXT, user TEXT)")
+conn.commit()
 
 STATUS_ORDER = ["⚪", "✅", "❌", "⚠️"]
-
-def parse_checklist(text):
-    lines = text.split("\n")
-    title = lines[0].replace("!!!", "").strip()
-    items = [l.strip() for l in lines[1:] if l.strip()]
-    return title, items
-
-def build_keyboard(cid):
-    data = checklists[cid]
-    keyboard = []
-    for i, item in enumerate(data["items"]):
-        status = data["status"][i]
-        user = data["users"][i]
-        label = f"{status} {item}"
-        if user:
-            label += f" ✔ {user}"
-        keyboard.append([InlineKeyboardButton(label, callback_data=f"{cid}:{i}")])
-    return InlineKeyboardMarkup(keyboard)
 
 def next_status(s):
     return STATUS_ORDER[(STATUS_ORDER.index(s) + 1) % len(STATUS_ORDER)]
 
-def smart_merge(old_items, new_items, old_status, old_users):
-    new_status, new_users = [], []
-    for item in new_items:
-        if item in old_items:
-            idx = old_items.index(item)
-            new_status.append(old_status[idx])
-            new_users.append(old_users[idx])
-        else:
-            new_status.append("⚪")
-            new_users.append(None)
-    return new_status, new_users
+def is_owner(user_id):
+    cur.execute("SELECT user_id FROM owner WHERE user_id=?", (str(user_id),))
+    return cur.fetchone() is not None
 
-def filter_items(items, status, mode):
-    result = []
-    for i, item in enumerate(items):
-        s = status[i]
-        if mode == "empty only" and s == "⚪":
-            result.append(item)
-        elif mode == "done only" and s == "✅":
-            result.append(item)
-        elif mode == "not done" and s in ["❌", "⚠️"]:
-            result.append(item)
-        elif mode == "empty and warning" and s in ["⚪", "⚠️"]:
-            result.append(item)
-    return result
+def is_allowed(chat_id):
+    cur.execute("SELECT chat_id FROM allowed_chats WHERE chat_id=?", (str(chat_id),))
+    return cur.fetchone() is not None
+
+# OWNER COMMANDS
+
+async def claim_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    cur.execute("SELECT * FROM owner")
+    if cur.fetchone():
+        await update.message.reply_text("❌ Owner already set")
+        return
+    cur.execute("INSERT INTO owner VALUES (?)", (user_id,))
+    conn.commit()
+    await update.message.reply_text("✅ You are now OWNER")
+
+async def allow_here(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        return
+    chat_id = str(update.effective_chat.id)
+    cur.execute("INSERT OR REPLACE INTO allowed_chats VALUES (?)", (chat_id,))
+    conn.commit()
+    await update.message.reply_text("✅ Chat allowed")
+
+async def disallow_here(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        return
+    chat_id = str(update.effective_chat.id)
+    cur.execute("DELETE FROM allowed_chats WHERE chat_id=?", (chat_id,))
+    conn.commit()
+    await update.message.reply_text("❌ Chat disallowed")
+
+async def list_allowed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        return
+    cur.execute("SELECT chat_id FROM allowed_chats")
+    rows = cur.fetchall()
+    text = "Allowed chats:\n" + "\n".join(r[0] for r in rows)
+    await update.message.reply_text(text)
+
+# CHECKLIST
+
+def build_keyboard(cid):
+    cur.execute("SELECT position, text, status, user FROM items WHERE cid=? ORDER BY position", (cid,))
+    rows = cur.fetchall()
+    keyboard = []
+    for pos, text, status, user in rows:
+        label = f"{status} {text}"
+        if user:
+            label += f" ✔ {user}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"{cid}:{pos}")])
+    return InlineKeyboardMarkup(keyboard)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+
+    if not is_allowed(chat_id):
+        return
+
     text = update.message.text
     if not text.startswith("!!!"):
         return
 
-    command = text.replace("!!!", "").strip().lower()
+    lines = text.split("\n")
+    title = lines[0].replace("!!!", "").strip()
+    items = [l.strip() for l in lines[1:] if l.strip()]
 
-    # FILTER
-    if command in ["empty only", "done only", "not done", "empty and warning"]:
-        reply = update.message.reply_to_message
-        if not reply:
-            return
-
-        if reply.reply_to_message:
-            cid = str(reply.reply_to_message.message_id)
-        else:
-            cid = str(reply.message_id)
-
-        if cid not in checklists:
-            return
-
-        data = checklists[cid]
-        filtered = filter_items(data["items"], data["status"], command)
-
-        new_text = "!!! filtered\n" + "\n".join(filtered)
-        await update.message.reply_text(new_text)
-        return
-
-    # CREATE / UPDATE
-    title, items = parse_checklist(text)
     cid = str(update.message.message_id)
 
-    if cid in checklists:
-        old = checklists[cid]
-        status, users = smart_merge(old["items"], items, old["status"], old["users"])
-    else:
-        status = ["⚪"] * len(items)
-        users = [None] * len(items)
-
-    checklists[cid] = {
-        "title": title,
-        "items": items,
-        "status": status,
-        "users": users
-    }
+    cur.execute("DELETE FROM items WHERE cid=?", (cid,))
+    for i, item in enumerate(items):
+        cur.execute("INSERT INTO items VALUES (?, ?, ?, ?, ?)", (cid, i, item, "⚪", None))
+    conn.commit()
 
     await update.message.reply_text(title, reply_markup=build_keyboard(cid))
-
-async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.edited_message
-    if not msg or not msg.text.startswith("!!!"):
-        return
-
-    cid = str(msg.message_id)
-    if cid not in checklists:
-        return
-
-    title, items = parse_checklist(msg.text)
-    old = checklists[cid]
-    status, users = smart_merge(old["items"], items, old["status"], old["users"])
-
-    checklists[cid] = {
-        "title": title,
-        "items": items,
-        "status": status,
-        "users": users
-    }
 
 async def toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    cid, idx = query.data.split(":")
-    idx = int(idx)
+    cid, pos = query.data.split(":")
+    pos = int(pos)
 
     user = query.from_user.first_name
 
-    checklists[cid]["status"][idx] = next_status(checklists[cid]["status"][idx])
-    checklists[cid]["users"][idx] = user
+    cur.execute("SELECT status FROM items WHERE cid=? AND position=?", (cid, pos))
+    s = cur.fetchone()[0]
+    new_s = next_status(s)
+
+    cur.execute("UPDATE items SET status=?, user=? WHERE cid=? AND position=?", (new_s, user, cid, pos))
+    conn.commit()
 
     await query.edit_message_reply_markup(reply_markup=build_keyboard(cid))
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔥 FINAL BOT WORKING")
+    await update.message.reply_text("🚀 UHOME BOT READY")
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("claimowner", claim_owner))
+    app.add_handler(CommandHandler("allowhere", allow_here))
+    app.add_handler(CommandHandler("disallowhere", disallow_here))
+    app.add_handler(CommandHandler("listallowed", list_allowed))
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_edit))
     app.add_handler(CallbackQueryHandler(toggle))
 
-    print("BOT RUNNING...")
+    print("SECURE BOT RUNNING")
     app.run_polling()
 
 if __name__ == "__main__":
